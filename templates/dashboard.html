@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>xboxproxy dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --border: #334155;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --good: #4ade80;
+    --bad: #f87171;
+    --warn: #facc15;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.4 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  header { padding: 14px 20px; border-bottom: 1px solid var(--border);
+           display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  #now { color: var(--muted); font-size: 12px; }
+  .container { padding: 16px 20px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 900px) { .container { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .container { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+             color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  .card .value { font-size: 24px; font-weight: 700; }
+  .card .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .grid { grid-column: 1 / -1; }
+  .chart-wrap { position: relative; height: 260px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+  td.path { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .ok { color: var(--good); } .err { color: var(--bad); } .warn { color: var(--warn); }
+  .badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--border); color: var(--muted); }
+  .muted { color: var(--muted); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>xboxproxy</h1>
+  <span id="now" class="muted"></span>
+  <span id="status" class="badge">loading</span>
+</header>
+
+<div class="container">
+  <div class="card">
+    <h2>Requests · 24h</h2>
+    <div class="value" id="c-requests">-</div>
+    <div class="sub" id="c-requests-hour">-</div>
+  </div>
+  <div class="card">
+    <h2>Avg TTFB · 24h</h2>
+    <div class="value" id="c-ttfb">-</div>
+    <div class="sub">time to upstream response headers</div>
+  </div>
+  <div class="card">
+    <h2>Avg Speed · 24h</h2>
+    <div class="value" id="c-speed">-</div>
+    <div class="sub">server-side transfer throughput</div>
+  </div>
+  <div class="card">
+    <h2>Error rate · 24h</h2>
+    <div class="value" id="c-errors">-</div>
+    <div class="sub" id="c-bytes">-</div>
+  </div>
+
+  <div class="card grid">
+    <h2>Throughput (kbps) · last hour</h2>
+    <div class="chart-wrap"><canvas id="chart-throughput"></canvas></div>
+  </div>
+
+  <div class="card grid">
+    <h2>Latency / Requests · last hour</h2>
+    <div class="chart-wrap"><canvas id="chart-latency"></canvas></div>
+  </div>
+
+  <div class="card grid">
+    <h2>Status · 24h</h2>
+    <div class="chart-wrap"><canvas id="chart-status"></canvas></div>
+  </div>
+
+  <div class="card grid">
+    <h2>CDN candidates</h2>
+    <table>
+      <thead><tr><th>Host</th><th>Domains</th><th>IP</th><th>Speed (kbps)</th><th>Latency (ms)</th><th>Status</th></tr></thead>
+      <tbody id="tb-hosts"></tbody>
+    </table>
+  </div>
+
+  <div class="card grid">
+    <h2>Recent speed tests</h2>
+    <table>
+      <thead><tr><th>Time</th><th>Host</th><th>IP</th><th>Latency (ms)</th><th>Speed (kbps)</th><th>OK</th></tr></thead>
+      <tbody id="tb-speedtests"></tbody>
+    </table>
+  </div>
+
+  <div class="card grid">
+    <h2>Recent requests</h2>
+    <table>
+      <thead><tr><th>Time</th><th>Client</th><th>Host</th><th>Path</th><th>Status</th><th>Bytes</th><th>Speed (kbps)</th><th>TTFB (ms)</th><th>Upstream</th><th>Error</th></tr></thead>
+      <tbody id="tb-requests"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const fmtTime = (ts) => new Date(ts * 1000).toLocaleString();
+const fmtBytes = (b) => {
+  const u = ["B","KB","MB","GB"]; let i = 0, v = b;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return v.toFixed(1) + " " + u[i];
+};
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+}[c]));
+const statusClass = (s) => s >= 500 ? "err" : (s >= 400 ? "warn" : "ok");
+
+let chSpeed, chLatency, chStatus;
+
+async function load() {
+  try {
+    const r = await fetch("/manage/api/summary");
+    const d = await r.json();
+    document.getElementById("status").textContent = "online";
+    document.getElementById("now").textContent = fmtTime(d.now);
+
+    const h24 = d.last_24h, h1 = d.last_hour;
+    document.getElementById("c-requests").textContent = h24.requests;
+    document.getElementById("c-requests-hour").textContent = h1.requests + " in last hour";
+    document.getElementById("c-ttfb").textContent = h24.ttfb_ms ? h24.ttfb_ms.toFixed(1) + " ms" : "-";
+    document.getElementById("c-speed").textContent = h24.throughput_kbps ? Math.round(h24.throughput_kbps).toLocaleString() + " kbps" : "-";
+    const rate = h24.requests ? (h24.errors / h24.requests * 100).toFixed(1) + "%" : "-";
+    document.getElementById("c-errors").textContent = rate;
+    document.getElementById("c-bytes").textContent = fmtBytes(h24.bytes) + " transferred";
+
+    const labels = d.series.map(s => new Date(s.ts * 1000).toLocaleTimeString());
+    const thp = d.series.map(s => Math.round(s.throughput_kbps));
+    const lat = d.series.map(s => s.ttfb_ms.toFixed(0));
+    const req = d.series.map(s => s.requests);
+
+    const base = { labels, borderColor: "#38bdf8", backgroundColor: "#38bdf822",
+                   tension: 0.3, fill: true, pointRadius: 1, borderWidth: 2 };
+    if (!chSpeed) {
+      chSpeed = new Chart(document.getElementById("chart-throughput"), {
+        type: "line", data: { labels, datasets: [{ ...base, label: "kbps" }] },
+        options: { responsive: true, maintainAspectRatio: false, animation: false }
+      });
+    } else { chSpeed.data.labels = labels; chSpeed.data.datasets[0].data = thp; chSpeed.update(); }
+
+    if (!chLatency) {
+      chLatency = new Chart(document.getElementById("chart-latency"), {
+        type: "line", data: {
+          labels,
+          datasets: [
+            { ...base, label: "avg TTFB (ms)", borderColor: "#4ade80", backgroundColor: "#4ade8022", yAxisID: "y" },
+            { ...base, label: "requests", borderColor: "#facc15", backgroundColor: "#facc1522", yAxisID: "y1" }
+          ]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          scales: { y: { position: "left" }, y1: { position: "right", grid: { drawOnChartArea: false } } }
+        }
+      });
+    } else {
+      chLatency.data.labels = labels;
+      chLatency.data.datasets[0].data = lat;
+      chLatency.data.datasets[1].data = req;
+      chLatency.update();
+    }
+
+    if (!chStatus) {
+      chStatus = new Chart(document.getElementById("chart-status"), {
+        type: "doughnut",
+        data: { labels: d.status_counts.map(s => s.status), datasets: [{ data: d.status_counts.map(s => s.count) }] },
+        options: { responsive: true, maintainAspectRatio: false, animation: false }
+      });
+    } else {
+      chStatus.data.labels = d.status_counts.map(s => s.status);
+      chStatus.data.datasets[0].data = d.status_counts.map(s => s.count);
+      chStatus.update();
+    }
+
+    const tbH = document.getElementById("tb-hosts");
+    tbH.innerHTML = "";
+    for (const h of d.hosts) {
+      for (let i = 0; i < Math.min(h.candidates.length, 5); i++) {
+        const c = h.candidates[i];
+        const tr = document.createElement("tr");
+        const isBest = i === 0 ? '<span class="badge">best</span> ' : "";
+        tr.innerHTML = `<td>${i === 0 ? esc(h.name) : ""}</td>
+          <td class="muted">${i === 0 ? esc(h.domains.join(", ")) : ""}</td>
+          <td>${isBest}${esc(c.ip)}</td>
+          <td>${c.speed_kbps ? Math.round(c.speed_kbps).toLocaleString() : "-"}</td>
+          <td>${c.latency_ms ?? "-"}</td>
+          <td class="${c.down ? "err" : "ok"}">${c.down ? "down" : "up"}</td>`;
+        tbH.appendChild(tr);
+      }
+    }
+
+    const tbS = document.getElementById("tb-speedtests");
+    tbS.innerHTML = "";
+    for (const s of d.recent_speedtests) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${fmtTime(s.ts)}</td><td>${esc(s.host)}</td><td>${esc(s.ip)}</td>
+        <td>${s.latency_ms ?? "-"}</td>
+        <td>${s.speed_kbps ? Math.round(s.speed_kbps).toLocaleString() : "-"}</td>
+        <td class="${s.success ? "ok" : "err"}">${s.success ? "yes" : "no"}</td>`;
+      tbS.appendChild(tr);
+    }
+
+    const tbR = document.getElementById("tb-requests");
+    tbR.innerHTML = "";
+    for (const r of d.recent) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${fmtTime(r.ts)}</td><td>${esc(r.client_ip)}</td><td>${esc(r.host)}</td>
+        <td class="path" title="${esc(r.path)}">${esc(r.method)} ${esc(r.path)}</td>
+        <td class="${statusClass(r.status)}">${r.status}</td>
+        <td>${fmtBytes(r.bytes)}</td>
+        <td>${r.throughput_kbps ? Math.round(r.throughput_kbps).toLocaleString() : "-"}</td>
+        <td>${r.ttfb_ms || "-"}</td>
+        <td>${esc(r.upstream_ip || "-")}</td>
+        <td class="muted">${esc(r.error ? r.error.slice(0, 60) : "")}</td>`;
+      tbR.appendChild(tr);
+    }
+  } catch (e) {
+    document.getElementById("status").textContent = "offline";
+    console.error(e);
+  }
+}
+
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>

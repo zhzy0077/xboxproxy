@@ -1,0 +1,14 @@
+services:
+  xboxproxy:
+    build: .
+    image: xboxproxy:latest
+    container_name: xboxproxy
+    restart: unless-stopped
+    # The DNS server rewrites Xbox download domains to this host, so publish the
+    # proxy on port 80 (optionally with a host IP so the container can be reached).
+    ports:
+      - "80:80"
+    volumes:
+      - ./data:/app/data
+    environment:
+      RUST_LOG: info
