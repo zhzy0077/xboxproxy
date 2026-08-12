@@ -148,7 +148,6 @@ btnSt.addEventListener("click", async () => {
     const r = await fetch("/manage/api/speedtests/run", { method: "POST" });
     const d = await r.json();
     if (d.started) setStMsg("started — results in ~1-2 min");
-    else if (d.reason === "download_in_progress") setStMsg("skipped: download in progress");
     else if (d.reason === "already_running") setStMsg("already running");
     else setStMsg("request failed");
   } catch {

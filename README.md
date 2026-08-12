@@ -119,7 +119,8 @@ are deliberately conservative:
   remaining tests are aborted. Active Xbox downloads are never starved, and
   measurements are not skewed by concurrent transfers.
 - The dashboard (`/manage`, "Run now" button) can trigger a pass manually. It
-  is skipped while a pass is already running or a download is in progress.
+  is a forced task: it runs immediately even while a download is in progress,
+  and is only skipped if a pass is already running.
 
 ## API
 

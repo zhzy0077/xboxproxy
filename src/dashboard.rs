@@ -9,7 +9,6 @@ use serde_json::json;
 use crate::db;
 use crate::proxy::AppState;
 use crate::selector::now_unix;
-use crate::speedtest;
 
 const DASHBOARD_HTML: &str = include_str!("../templates/dashboard.html");
 
@@ -78,11 +77,8 @@ async fn run_speedtest(State(state): State<AppState>) -> Response {
     if state.speedtest.is_running() {
         return Json(json!({ "started": false, "reason": "already_running" })).into_response();
     }
-    if state.metrics.is_busy(speedtest::ACTIVITY_GRACE) {
-        return Json(json!({ "started": false, "reason": "download_in_progress" })).into_response();
-    }
     state.speedtest.trigger();
-    tracing::info!("manual speedtest requested via dashboard");
+    tracing::info!("manual speedtest requested via dashboard (forced)");
     Json(json!({ "started": true, "reason": null })).into_response()
 }
 

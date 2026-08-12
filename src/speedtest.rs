@@ -89,22 +89,30 @@ pub async fn run_forever(
     let warmup = cfg.warmup_passes.max(1);
     for i in 0..warmup {
         wait_until_idle(&cfg, &metrics).await;
-        run_controlled_pass(&cfg, &selector, &metrics, &client, &control).await;
+        run_controlled_pass(&cfg, &selector, &metrics, &client, &control, false).await;
         if i + 1 < warmup {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
     loop {
-        tokio::select! {
+        let forced = tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(cfg.interval_sec)) => {
                 tracing::info!("scheduled speedtest pass due");
+                false
             }
             _ = control.inner.notify.notified() => {
-                tracing::info!("manual speedtest requested");
+                tracing::info!("manual speedtest requested (forced)");
+                true
             }
+        };
+        if forced {
+            // Manual trigger: run immediately, even if the proxy is serving
+            // downloads, and do not abort mid-pass because of traffic.
+            run_controlled_pass(&cfg, &selector, &metrics, &client, &control, true).await;
+        } else {
+            wait_until_idle(&cfg, &metrics).await;
+            run_controlled_pass(&cfg, &selector, &metrics, &client, &control, false).await;
         }
-        wait_until_idle(&cfg, &metrics).await;
-        run_controlled_pass(&cfg, &selector, &metrics, &client, &control).await;
     }
 }
 
@@ -126,9 +134,10 @@ async fn run_controlled_pass(
     metrics: &MetricsStore,
     client: &ProxyClient,
     control: &SpeedTestControl,
+    forced: bool,
 ) {
     control.inner.running.store(true, Ordering::SeqCst);
-    run_pass(cfg, selector, metrics, client).await;
+    run_pass(cfg, selector, metrics, client, forced).await;
     control.inner.running.store(false, Ordering::SeqCst);
 }
 
@@ -137,6 +146,7 @@ pub async fn run_pass(
     selector: &Selector,
     metrics: &MetricsStore,
     client: &ProxyClient,
+    forced: bool,
 ) {
     let defs = selector.defs();
     let total: usize = defs.iter().map(|d| d.ips.len()).sum();
@@ -169,11 +179,11 @@ pub async fn run_pass(
     }
 
     // Process in waves of `max_concurrency`, checking for live downloads
-    // between waves: if a download starts mid-pass, the remaining tests are
-    // aborted so the download is not starved.
+    // between waves (unless forced): if a download starts mid-pass, the
+    // remaining tests are aborted so the download is not starved.
     let mut waves = stream::iter(tasks).chunks(cfg.max_concurrency.max(1));
     while let Some(wave) = waves.next().await {
-        if metrics.is_busy(ACTIVITY_GRACE) {
+        if !forced && metrics.is_busy(ACTIVITY_GRACE) {
             tracing::info!("download traffic detected; aborting speedtest pass");
             break;
         }
