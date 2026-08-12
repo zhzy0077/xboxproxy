@@ -38,6 +38,76 @@ With Docker:
 docker compose up -d --build
 ```
 
+## Home Network Setup (AdGuard Home + Caddy)
+
+xboxproxy only helps if Xbox download traffic actually reaches it. The typical
+home setup hijacks the CDN hostnames on the LAN with a DNS server and terminates
+them with Caddy in front of xboxproxy:
+
+```text
+Xbox/console  →  AdGuard Home (DNS rewrite → proxy host)  →  Caddy :80  →  xboxproxy :80
+```
+
+1. Point the LAN router/DHCP at AdGuard Home (or any DNS server that supports
+   rewrites, e.g. dnsmasq or Pi-hole) so every client on the subnet resolves
+   through it.
+
+2. Add a DNS rewrite for **every** CDN hostname to the proxy host IP
+   (example: `192.168.31.246`):
+
+   ```text
+   assets1.xboxlive.com    → 192.168.31.246
+   assets2.xboxlive.com    → 192.168.31.246
+   d1.xboxlive.com         → 192.168.31.246
+   d2.xboxlive.com         → 192.168.31.246
+   xvcf1.xboxlive.com      → 192.168.31.246
+   xvcf2.xboxlive.com      → 192.168.31.246
+   dlassets.xboxlive.com   → 192.168.31.246
+   dlassets2.xboxlive.com  → 192.168.31.246
+   assets1.xboxlive.cn     → 192.168.31.246
+   assets2.xboxlive.cn     → 192.168.31.246
+   d1.xboxlive.cn          → 192.168.31.246
+   d2.xboxlive.cn          → 192.168.31.246
+   dlassets.xboxlive.cn    → 192.168.31.246
+   dlassets2.xboxlive.cn   → 192.168.31.246
+   ```
+
+   The `.com` entries cover the hostnames the console actually uses; the `.cn`
+   entries cover the upstream hostnames so that direct `.cn` lookups don't
+   bypass the proxy and hit the real Microsoft edge.
+
+3. Run xboxproxy behind Caddy. If another service already owns host port 80
+   (Caddy itself, for example), publish xboxproxy on a different port
+   (`8056:80`) and reverse-proxy the hijacked hostnames in the Caddyfile:
+
+   ```caddyfile
+   http://assets1.xboxlive.com, http://assets2.xboxlive.com,
+   http://d1.xboxlive.com, http://d2.xboxlive.com,
+   http://xvcf1.xboxlive.com, http://xvcf2.xboxlive.com,
+   http://dlassets.xboxlive.com, http://dlassets2.xboxlive.com,
+   http://assets1.xboxlive.cn, http://assets2.xboxlive.cn,
+   http://d1.xboxlive.cn, http://d2.xboxlive.cn,
+   http://dlassets.xboxlive.cn, http://dlassets2.xboxlive.cn {
+       reverse_proxy xboxproxy:80
+   }
+   ```
+
+   Caddy forwards the original `Host` header by default, which is what the
+   proxy uses to select the endpoint and its upstream `.cn` host. If port 80
+   is free, `docker compose up -d` (`80:80`) works without Caddy.
+
+4. Verify from a LAN client:
+
+   ```sh
+   dig +short assets1.xboxlive.com   # → 192.168.31.246
+   dig +short assets1.xboxlive.cn    # → 192.168.31.246
+   curl -sv http://assets1.xboxlive.com/ 2>&1 | grep '< HTTP'
+   ```
+
+   Any HTTP response (even a 400 XML error from the Microsoft edge for the
+   bare `/` path) means the request was proxied; a connection error or timeout
+   means the DNS rewrite or Caddy routing is wrong.
+
 ## API
 
 | Endpoint | Description |
