@@ -28,6 +28,7 @@ use tower::Service;
 use crate::db::RequestRecord;
 use crate::metrics::MetricsStore;
 use crate::selector::{now_unix, Selector, CURRENT_IP};
+use crate::speedtest::SpeedTestControl;
 
 pub type ProxyClient = Client<UpstreamConnector, Body>;
 
@@ -55,6 +56,7 @@ pub struct AppState {
     pub metrics: MetricsStore,
     pub client: ProxyClient,
     pub db_path: PathBuf,
+    pub speedtest: SpeedTestControl,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -318,6 +320,7 @@ pub async fn proxy_handler(
     if !is_rewritten {
         return not_found();
     }
+    let _activity = state.metrics.begin_request();
     let upstream_host = state
         .selector
         .upstream_host_for(&host_name)
@@ -608,6 +611,7 @@ mod tests {
             metrics: MetricsStore::new(tx),
             client,
             db_path: std::path::PathBuf::from("/tmp/xboxproxy-test.db"),
+            speedtest: SpeedTestControl::new(),
         };
         let req = axum::http::Request::builder()
             .uri("/")

@@ -1,4 +1,6 @@
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -6,6 +8,7 @@ use futures::{stream, StreamExt};
 use http::header::{HOST, RANGE, USER_AGENT};
 use http_body_util::BodyExt;
 use hyper::{Request, Uri};
+use tokio::sync::Notify;
 
 use crate::db::SpeedTestRecord;
 use crate::metrics::MetricsStore;
@@ -22,19 +25,56 @@ pub struct SpeedTestConfig {
     pub warmup_passes: usize,
     pub failure_penalty_sec: u64,
     pub max_concurrency: usize,
+    /// How long to wait before retrying a pass that was postponed because the
+    /// proxy was serving downloads.
+    pub busy_retry_sec: u64,
 }
 
 impl Default for SpeedTestConfig {
     fn default() -> Self {
         Self {
-            interval_sec: 300,
+            interval_sec: 3600,
             connect_timeout_ms: 2_000,
             read_timeout_ms: 10_000,
             test_chunk_bytes: 10 * 1024 * 1024,
             warmup_passes: 1,
             failure_penalty_sec: 60,
             max_concurrency: 64,
+            busy_retry_sec: 60,
         }
+    }
+}
+
+/// A speedtest pass is never started while the proxy has served a request
+/// within this window, so active Xbox downloads are not starved and
+/// measurements are not skewed by concurrent transfers.
+pub const ACTIVITY_GRACE: Duration = Duration::from_secs(60);
+
+/// Shared handle for triggering speedtest passes on demand (dashboard button)
+/// and for reporting whether a pass is currently running.
+#[derive(Clone, Default)]
+pub struct SpeedTestControl {
+    inner: Arc<SpeedTestControlInner>,
+}
+
+#[derive(Default)]
+struct SpeedTestControlInner {
+    notify: Notify,
+    running: AtomicBool,
+}
+
+impl SpeedTestControl {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Wake the speedtest loop so it runs a pass as soon as the proxy is idle.
+    pub fn trigger(&self) {
+        self.inner.notify.notify_one();
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.inner.running.load(Ordering::SeqCst)
     }
 }
 
@@ -43,19 +83,53 @@ pub async fn run_forever(
     selector: Selector,
     metrics: MetricsStore,
     client: ProxyClient,
+    control: SpeedTestControl,
 ) {
     tracing::info!(interval_sec = cfg.interval_sec, "speedtest loop started");
     let warmup = cfg.warmup_passes.max(1);
     for i in 0..warmup {
-        run_pass(&cfg, &selector, &metrics, &client).await;
+        wait_until_idle(&cfg, &metrics).await;
+        run_controlled_pass(&cfg, &selector, &metrics, &client, &control).await;
         if i + 1 < warmup {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
     loop {
-        tokio::time::sleep(Duration::from_secs(cfg.interval_sec)).await;
-        run_pass(&cfg, &selector, &metrics, &client).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(cfg.interval_sec)) => {
+                tracing::info!("scheduled speedtest pass due");
+            }
+            _ = control.inner.notify.notified() => {
+                tracing::info!("manual speedtest requested");
+            }
+        }
+        wait_until_idle(&cfg, &metrics).await;
+        run_controlled_pass(&cfg, &selector, &metrics, &client, &control).await;
     }
+}
+
+/// Block until the proxy is not serving downloads (polling every
+/// `busy_retry_sec`), so a pass never runs while a download is active.
+async fn wait_until_idle(cfg: &SpeedTestConfig, metrics: &MetricsStore) {
+    while metrics.is_busy(ACTIVITY_GRACE) {
+        tracing::info!(
+            active_requests = metrics.active_requests(),
+            "proxy busy serving downloads; postponing speedtest pass"
+        );
+        tokio::time::sleep(Duration::from_secs(cfg.busy_retry_sec)).await;
+    }
+}
+
+async fn run_controlled_pass(
+    cfg: &SpeedTestConfig,
+    selector: &Selector,
+    metrics: &MetricsStore,
+    client: &ProxyClient,
+    control: &SpeedTestControl,
+) {
+    control.inner.running.store(true, Ordering::SeqCst);
+    run_pass(cfg, selector, metrics, client).await;
+    control.inner.running.store(false, Ordering::SeqCst);
 }
 
 pub async fn run_pass(
@@ -94,23 +168,32 @@ pub async fn run_pass(
         }
     }
 
-    let results: Vec<_> = stream::iter(tasks)
-        .buffer_unordered(cfg.max_concurrency.max(1))
-        .collect()
-        .await;
-
-    for (def, ip, r) in results {
-        selector
-            .update_result(&def.name, ip, r.latency_ms, r.speed_kbps, r.success)
+    // Process in waves of `max_concurrency`, checking for live downloads
+    // between waves: if a download starts mid-pass, the remaining tests are
+    // aborted so the download is not starved.
+    let mut waves = stream::iter(tasks).chunks(cfg.max_concurrency.max(1));
+    while let Some(wave) = waves.next().await {
+        if metrics.is_busy(ACTIVITY_GRACE) {
+            tracing::info!("download traffic detected; aborting speedtest pass");
+            break;
+        }
+        let results: Vec<_> = stream::iter(wave)
+            .buffer_unordered(cfg.max_concurrency.max(1))
+            .collect()
             .await;
-        metrics.record_speedtest(SpeedTestRecord {
-            ts: now_unix() as i64,
-            host: def.name.clone(),
-            ip: ip.to_string(),
-            latency_ms: r.latency_ms,
-            speed_kbps: r.speed_kbps,
-            success: r.success,
-        });
+        for (def, ip, r) in results {
+            selector
+                .update_result(&def.name, ip, r.latency_ms, r.speed_kbps, r.success)
+                .await;
+            metrics.record_speedtest(SpeedTestRecord {
+                ts: now_unix() as i64,
+                host: def.name.clone(),
+                ip: ip.to_string(),
+                latency_ms: r.latency_ms,
+                speed_kbps: r.speed_kbps,
+                success: r.success,
+            });
+        }
     }
 }
 
@@ -256,6 +339,7 @@ mod tests {
             warmup_passes: 1,
             failure_penalty_sec: 60,
             max_concurrency: 1,
+            busy_retry_sec: 60,
         }
     }
 

@@ -1,7 +1,7 @@
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -9,6 +9,7 @@ use serde_json::json;
 use crate::db;
 use crate::proxy::AppState;
 use crate::selector::now_unix;
+use crate::speedtest;
 
 const DASHBOARD_HTML: &str = include_str!("../templates/dashboard.html");
 
@@ -19,6 +20,7 @@ pub fn router(state: AppState) -> Router {
         .route("/manage/api/summary", get(summary))
         .route("/manage/api/requests", get(requests))
         .route("/manage/api/speedtests", get(speedtests))
+        .route("/manage/api/speedtests/run", post(run_speedtest))
         .route("/manage/api/hosts", get(hosts))
         .with_state(state)
 }
@@ -65,10 +67,23 @@ async fn summary(State(state): State<AppState>) -> Response {
             "hosts": hosts,
             "recent": recent,
             "recent_speedtests": recent_st,
+            "speedtest_running": state.speedtest.is_running(),
         }))
         .into_response(),
         _ => to_500(anyhow::anyhow!("query failed")),
     }
+}
+
+async fn run_speedtest(State(state): State<AppState>) -> Response {
+    if state.speedtest.is_running() {
+        return Json(json!({ "started": false, "reason": "already_running" })).into_response();
+    }
+    if state.metrics.is_busy(speedtest::ACTIVITY_GRACE) {
+        return Json(json!({ "started": false, "reason": "download_in_progress" })).into_response();
+    }
+    state.speedtest.trigger();
+    tracing::info!("manual speedtest requested via dashboard");
+    Json(json!({ "started": true, "reason": null })).into_response()
 }
 
 async fn requests(State(state): State<AppState>, Query(q): Query<LimitQuery>) -> Response {

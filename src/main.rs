@@ -77,12 +77,15 @@ async fn main() -> anyhow::Result<()> {
             .pool_max_idle_per_host(0)
             .build(connector);
 
-    // Periodic upstream speed/latency measurement.
+    // Periodic upstream speed/latency measurement. The control handle is also
+    // used by the dashboard "Run now" button.
+    let speedtest_control = speedtest::SpeedTestControl::new();
     tokio::spawn(speedtest::run_forever(
         speedtest_cfg,
         selector.clone(),
         metrics.clone(),
         client.clone(),
+        speedtest_control.clone(),
     ));
 
     let app_state = AppState {
@@ -90,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
         metrics,
         client,
         db_path,
+        speedtest: speedtest_control,
     };
 
     let bind_addr: SocketAddr = "0.0.0.0:80".parse()?;

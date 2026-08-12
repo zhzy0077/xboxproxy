@@ -43,6 +43,9 @@
   .badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--border); color: var(--muted); }
   .muted { color: var(--muted); }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .btn { background: var(--accent); color: #0f172a; border: 0; border-radius: 6px;
+         padding: 4px 12px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .btn:disabled { opacity: .5; cursor: default; }
 </style>
 </head>
 <body>
@@ -98,7 +101,13 @@
   </div>
 
   <div class="card grid">
-    <h2>Recent speed tests</h2>
+    <div class="row" style="justify-content: space-between;">
+      <h2>Recent speed tests</h2>
+      <span class="row">
+        <span id="st-msg" class="muted"></span>
+        <button id="btn-speedtest" class="btn" type="button">Run now</button>
+      </span>
+    </div>
     <table>
       <thead><tr><th>Time</th><th>Host</th><th>IP</th><th>Latency (ms)</th><th>Speed (kbps)</th><th>OK</th></tr></thead>
       <tbody id="tb-speedtests"></tbody>
@@ -127,6 +136,25 @@ const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({
 const statusClass = (s) => s >= 500 ? "err" : (s >= 400 ? "warn" : "ok");
 
 let chSpeed, chLatency, chStatus;
+const btnSt = document.getElementById("btn-speedtest");
+const stMsg = document.getElementById("st-msg");
+let stMsgSetAt = 0;
+const setStMsg = (t) => { stMsg.textContent = t; stMsgSetAt = Date.now(); };
+
+btnSt.addEventListener("click", async () => {
+  btnSt.disabled = true;
+  setStMsg("starting…");
+  try {
+    const r = await fetch("/manage/api/speedtests/run", { method: "POST" });
+    const d = await r.json();
+    if (d.started) setStMsg("started — results in ~1-2 min");
+    else if (d.reason === "download_in_progress") setStMsg("skipped: download in progress");
+    else if (d.reason === "already_running") setStMsg("already running");
+    else setStMsg("request failed");
+  } catch {
+    setStMsg("request failed");
+  }
+});
 
 async function load() {
   try {
@@ -134,6 +162,14 @@ async function load() {
     const d = await r.json();
     document.getElementById("status").textContent = "online";
     document.getElementById("now").textContent = fmtTime(d.now);
+
+    if (d.speedtest_running) {
+      btnSt.disabled = true;
+      setStMsg("running…");
+    } else {
+      btnSt.disabled = false;
+      if (Date.now() - stMsgSetAt > 10000) stMsg.textContent = "";
+    }
 
     const h24 = d.last_24h, h1 = d.last_hour;
     document.getElementById("c-requests").textContent = h24.requests;

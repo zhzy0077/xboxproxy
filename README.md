@@ -108,6 +108,19 @@ Xbox/console  →  AdGuard Home (DNS rewrite → proxy host)  →  Caddy :80  �
    bare `/` path) means the request was proxied; a connection error or timeout
    means the DNS rewrite or Caddy routing is wrong.
 
+## Speed Testing Policy
+
+Speed tests can saturate the uplink (64 concurrent 10 MiB downloads), so they
+are deliberately conservative:
+
+- A pass runs at most once per hour (plus one warm-up pass at startup).
+- While the proxy is serving client traffic (or served a request within the
+  last 60 seconds), a pass is postponed; if a download starts mid-pass, the
+  remaining tests are aborted. Active Xbox downloads are never starved, and
+  measurements are not skewed by concurrent transfers.
+- The dashboard (`/manage`, "Run now" button) can trigger a pass manually. It
+  is skipped while a pass is already running or a download is in progress.
+
 ## API
 
 | Endpoint | Description |
@@ -116,6 +129,7 @@ Xbox/console  →  AdGuard Home (DNS rewrite → proxy host)  →  Caddy :80  �
 | `/manage/api/summary` | Recent summary, charts, hosts, and records |
 | `/manage/api/requests?limit=100&since=<unix>` | Recent request metrics |
 | `/manage/api/speedtests?limit=100` | Recent speed-test results |
+| `/manage/api/speedtests/run` (POST) | Trigger a speed-test pass manually |
 | `/manage/api/hosts` | Current candidate ranking |
 
 ## Tests
