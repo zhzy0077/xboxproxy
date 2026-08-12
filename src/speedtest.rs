@@ -188,7 +188,6 @@ async fn measure(
     let dl_start = Instant::now();
     let mut bytes = 0u64;
     let timeout = Duration::from_millis(cfg.read_timeout_ms);
-    let mut body_failed = false;
     loop {
         if bytes >= chunk {
             break;
@@ -200,10 +199,7 @@ async fn measure(
         let remaining = timeout - elapsed;
         match tokio::time::timeout(remaining, body.next()).await {
             Ok(Some(Ok(data))) => bytes = bytes.saturating_add(data.len() as u64).min(chunk),
-            Ok(Some(Err(_))) => {
-                body_failed = true;
-                break;
-            }
+            Ok(Some(Err(_))) => break,
             Ok(None) => break,
             Err(_) => break,
         }
@@ -214,10 +210,15 @@ async fn measure(
     } else {
         0.0
     };
+    // Match the reference implementation: an IP is usable as soon as any data
+    // was downloaded (partial transfers from throttled or mid-body-dropped
+    // connections still count, ranked by their speed estimate). Requiring the
+    // full chunk here marks perfectly usable IPs as failed whenever the CDN
+    // throttles concurrent transfers or drops a connection mid-body.
     MeasureResult {
         latency_ms: Some(latency_ms),
         speed_kbps: Some(speed_kbps),
-        success: bytes == chunk && !body_failed,
+        success: bytes > 0,
     }
 }
 
@@ -281,6 +282,37 @@ mod tests {
         let result = measure(&cfg, &def, &url.parse().unwrap(), addr.ip(), &client).await;
         assert!(!result.success);
         assert_eq!(result.speed_kbps, None);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn partial_body_still_counts_as_usable() {
+        let (client, listener, addr) = test_client().await;
+        // Serve only half of the requested chunk: the reference implementation
+        // treats any downloaded bytes as a usable (ranked) candidate.
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-1/1048576\r\nContent-Length: 2\r\n\r\nok",
+                )
+                .await
+                .unwrap();
+        });
+        let url = format!("http://test.invalid:{}/file", addr.port());
+        let def = HostDef {
+            name: "test".into(),
+            domain_map: vec![("test.invalid".into(), "test.invalid".into())],
+            ips: vec![addr.ip()],
+            upstream_port: addr.port(),
+            test_url: url.clone(),
+        };
+        let cfg = test_config();
+        let result = measure(&cfg, &def, &url.parse().unwrap(), addr.ip(), &client).await;
+        assert!(result.success);
+        assert!(result.speed_kbps.is_some());
         server.await.unwrap();
     }
 }

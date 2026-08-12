@@ -68,8 +68,13 @@ async fn main() -> anyhow::Result<()> {
         selector: selector.clone(),
         connect_timeout: Duration::from_millis(speedtest_cfg.connect_timeout_ms),
     };
+    // Connections must not be pooled: the pool is keyed by host, so a pooled
+    // connection would keep serving the first IP even after the selector picks
+    // a faster candidate. Open a fresh connection per request instead (the
+    // reference XboxDownload client disables pooling for the same reason).
     let client: proxy::ProxyClient =
         hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+            .pool_max_idle_per_host(0)
             .build(connector);
 
     // Periodic upstream speed/latency measurement.

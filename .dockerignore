@@ -1,0 +1,7 @@
+.git
+.github
+target
+data/*.db
+data/*.db-wal
+data/*.db-shm
+*.log

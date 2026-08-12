@@ -2,6 +2,7 @@
 FROM rust:1.97 AS builder
 WORKDIR /build
 COPY Cargo.toml ./
+COPY Cargo.lock ./
 COPY src ./src
 COPY templates ./templates
 COPY data ./data
