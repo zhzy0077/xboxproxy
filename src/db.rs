@@ -174,22 +174,30 @@ fn writer_loop(conn: Connection, rx: mpsc::Receiver<DbCommand>) {
 #[derive(Debug, Default, Serialize)]
 pub struct TimeWindowStats {
     pub requests: i64,
+    /// Aggregate service throughput over the window: SUM(bytes) * 8 / 1024 /
+    /// window_secs. This includes all parallel connections, matching what a
+    /// multi-threaded downloader reports (e.g. the Xbox console UI).
     pub throughput_kbps: f64,
     pub ttfb_ms: f64,
     pub errors: i64,
     pub bytes: i64,
 }
 
-pub fn stats_since(conn: &Connection, since: i64) -> anyhow::Result<TimeWindowStats> {
+pub fn stats_since(
+    conn: &Connection,
+    since: i64,
+    window_secs: i64,
+) -> anyhow::Result<TimeWindowStats> {
     let mut st = conn.prepare(
-        "SELECT COUNT(*), COALESCE(AVG(throughput_kbps),0), COALESCE(AVG(ttfb_ms),0),
+        "SELECT COUNT(*), COALESCE(SUM(bytes),0), COALESCE(AVG(ttfb_ms),0),
                 COALESCE(SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END),0), COALESCE(SUM(bytes),0)
          FROM requests WHERE ts >= ?1",
     )?;
     let row = st.query_row([since], |r| {
+        let bytes: i64 = r.get(1)?;
         Ok(TimeWindowStats {
             requests: r.get(0)?,
-            throughput_kbps: r.get(1)?,
+            throughput_kbps: bytes as f64 * 8.0 / 1024.0 / window_secs as f64,
             ttfb_ms: r.get(2)?,
             errors: r.get(3)?,
             bytes: r.get(4)?,
@@ -202,22 +210,29 @@ pub fn stats_since(conn: &Connection, since: i64) -> anyhow::Result<TimeWindowSt
 pub struct BucketStat {
     pub ts: i64,
     pub requests: i64,
+    /// Aggregate throughput in this bucket: SUM(bytes) * 8 / 1024 /
+    /// bucket_secs (all parallel connections combined).
     pub throughput_kbps: f64,
     pub ttfb_ms: f64,
     pub errors: i64,
 }
 
-pub fn series_since(conn: &Connection, since: i64) -> anyhow::Result<Vec<BucketStat>> {
+pub fn series_since(
+    conn: &Connection,
+    since: i64,
+    bucket_secs: i64,
+) -> anyhow::Result<Vec<BucketStat>> {
     let mut st = conn.prepare(
-        "SELECT (ts / 60) * 60 AS bucket, COUNT(*), COALESCE(AVG(throughput_kbps),0),
+        "SELECT (ts / ?2) * ?2 AS bucket, COUNT(*), COALESCE(SUM(bytes),0),
                 COALESCE(AVG(ttfb_ms),0), COALESCE(SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END),0)
          FROM requests WHERE ts >= ?1 GROUP BY bucket ORDER BY bucket",
     )?;
-    let rows = st.query_map([since], |r| {
+    let rows = st.query_map(rusqlite::params![since, bucket_secs], |r| {
+        let bytes: i64 = r.get(2)?;
         Ok(BucketStat {
             ts: r.get(0)?,
             requests: r.get(1)?,
-            throughput_kbps: r.get(2)?,
+            throughput_kbps: bytes as f64 * 8.0 / 1024.0 / bucket_secs as f64,
             ttfb_ms: r.get(3)?,
             errors: r.get(4)?,
         })

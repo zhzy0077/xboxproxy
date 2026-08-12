@@ -49,9 +49,9 @@ async fn summary(State(state): State<AppState>) -> Response {
         Ok(c) => c,
         Err(e) => return to_500(e),
     };
-    let hour = db::stats_since(&conn, now - 3600);
-    let day = db::stats_since(&conn, now - 86400);
-    let series = db::series_since(&conn, now - 3600);
+    let hour = db::stats_since(&conn, now - 3600, 3600);
+    let day = db::stats_since(&conn, now - 86400, 86400);
+    let series = db::series_since(&conn, now - 3600, 60);
     let status = db::status_counts(&conn, now - 86400);
     let hosts = state.selector.snapshot().await;
     let recent = db::recent_requests(&conn, 50, Some(now - 3600));
