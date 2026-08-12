@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::connect_info::ConnectInfo;
@@ -30,6 +30,24 @@ use crate::metrics::MetricsStore;
 use crate::selector::{now_unix, Selector, CURRENT_IP};
 
 pub type ProxyClient = Client<UpstreamConnector, Body>;
+
+/// Maximum time to wait for the upstream to send response headers after the
+/// connection is established. Some CDN IPs accept TCP connections and then
+/// never respond; without this cap a single dead IP would hang proxy requests
+/// (and the speedtest pass) indefinitely.
+const UPSTREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn request_upstream(
+    client: &ProxyClient,
+    req: axum::http::Request<Body>,
+    pre: Option<IpAddr>,
+) -> Result<(Response<hyper::body::Incoming>, Option<IpAddr>), String> {
+    let (result, chosen) =
+        tokio::time::timeout(UPSTREAM_HEADER_TIMEOUT, request_with_ip(client, req, pre))
+            .await
+            .map_err(|_| "upstream response header timeout".to_string())?;
+    result.map(|r| (r, chosen)).map_err(|e| e.to_string())
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -383,9 +401,8 @@ pub async fn proxy_handler(
                 }
             };
             let t0 = Instant::now();
-            let (out, chosen) = request_with_ip(&state.client, up_req, ip).await;
-            match out {
-                Ok(r) => {
+            match request_upstream(&state.client, up_req, ip).await {
+                Ok((r, chosen)) => {
                     let up_status = r.status().as_u16();
                     let response_headers: Vec<String> = r
                         .headers()
@@ -407,10 +424,10 @@ pub async fn proxy_handler(
                     break;
                 }
                 Err(e) => {
-                    let err = e.to_string();
+                    let err = e;
                     last_err = Some(err.clone());
                     tracing::debug!(
-                        %host_name, %method, attempt, requested_ip = ?ip, upstream_ip = ?chosen,
+                        %host_name, %method, attempt, requested_ip = ?ip,
                         error = %err, "upstream attempt failed"
                     );
                     if let Some(ip) = ip {
@@ -438,9 +455,8 @@ pub async fn proxy_handler(
             }
         };
         let t0 = Instant::now();
-        let (out, chosen) = request_with_ip(&state.client, up_req, ip).await;
-        match out {
-            Ok(r) => {
+        match request_upstream(&state.client, up_req, ip).await {
+            Ok((r, chosen)) => {
                 let up_status = r.status().as_u16();
                 let response_headers: Vec<String> = r
                     .headers()
@@ -459,10 +475,10 @@ pub async fn proxy_handler(
                 resp = Some(r);
             }
             Err(e) => {
-                let err = e.to_string();
+                let err = e;
                 last_err = Some(err.clone());
                 tracing::debug!(
-                    %host_name, %method, requested_ip = ?ip, upstream_ip = ?chosen,
+                    %host_name, %method, requested_ip = ?ip,
                     error = %err, "upstream attempt failed"
                 );
                 if let Some(ip) = ip {

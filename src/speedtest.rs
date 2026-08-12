@@ -151,7 +151,24 @@ async fn measure(
         .expect("build speedtest request");
 
     let start = Instant::now();
-    let (result, _chosen) = request_with_ip(client, req, Some(ip)).await;
+    // A server that accepts the TCP connection but never sends response
+    // headers would otherwise stall the request forever (there is no built-in
+    // header timeout in the HTTP client). That would wedge the whole speedtest
+    // pass, since buffer_unordered waits for every task. Cap connect + headers
+    // explicitly; the body read loop below has its own timeout.
+    let request_timeout = Duration::from_millis(cfg.connect_timeout_ms + cfg.read_timeout_ms);
+    let (result, _chosen) =
+        match tokio::time::timeout(request_timeout, request_with_ip(client, req, Some(ip))).await {
+            Ok(v) => v,
+            Err(_) => {
+                tracing::debug!(%ip, "speedtest request timed out waiting for response");
+                return MeasureResult {
+                    latency_ms: None,
+                    speed_kbps: None,
+                    success: false,
+                };
+            }
+        };
     let resp = match result {
         Ok(r) => r,
         Err(e) => {
@@ -314,5 +331,33 @@ mod tests {
         assert!(result.success);
         assert!(result.speed_kbps.is_some());
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn silent_server_times_out_and_fails() {
+        let (client, listener, addr) = test_client().await;
+        // Server accepts the connection, reads the request, and then never
+        // sends a response. The measurement must fail instead of hanging.
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let _ = &mut stream;
+        });
+        let url = format!("http://test.invalid:{}/file", addr.port());
+        let def = HostDef {
+            name: "test".into(),
+            domain_map: vec![("test.invalid".into(), "test.invalid".into())],
+            ips: vec![addr.ip()],
+            upstream_port: addr.port(),
+            test_url: url.clone(),
+        };
+        let cfg = test_config();
+        let result = measure(&cfg, &def, &url.parse().unwrap(), addr.ip(), &client).await;
+        assert!(!result.success);
+        assert!(result.latency_ms.is_none());
+        assert!(result.speed_kbps.is_none());
+        server.abort();
     }
 }
