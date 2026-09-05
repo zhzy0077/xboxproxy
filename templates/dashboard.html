@@ -149,6 +149,7 @@ btnSt.addEventListener("click", async () => {
     const d = await r.json();
     if (d.started) setStMsg("started — results in ~1-2 min");
     else if (d.reason === "already_running") setStMsg("already running");
+    else if (d.reason === "pinned") setStMsg("disabled — IPs pinned");
     else setStMsg("request failed");
   } catch {
     setStMsg("request failed");
@@ -162,7 +163,10 @@ async function load() {
     document.getElementById("status").textContent = "online";
     document.getElementById("now").textContent = fmtTime(d.now);
 
-    if (d.speedtest_running) {
+    if (d.pinned || d.speedtest_disabled) {
+      btnSt.disabled = true;
+      stMsg.textContent = "disabled — IPs pinned";
+    } else if (d.speedtest_running) {
       btnSt.disabled = true;
       setStMsg("running…");
     } else {
@@ -232,7 +236,9 @@ async function load() {
       for (let i = 0; i < Math.min(h.candidates.length, 5); i++) {
         const c = h.candidates[i];
         const tr = document.createElement("tr");
-        const isBest = i === 0 ? '<span class="badge">best</span> ' : "";
+        const isBest = i === 0
+          ? (d.pinned ? '<span class="badge">pinned</span> ' : '<span class="badge">best</span> ')
+          : "";
         tr.innerHTML = `<td>${i === 0 ? esc(h.name) : ""}</td>
           <td class="muted">${i === 0 ? esc(h.domains.join(", ")) : ""}</td>
           <td>${isBest}${esc(c.ip)}</td>

@@ -25,12 +25,23 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let host_defs = endpoints::load()?;
+    let loaded = endpoints::load()?;
+    let host_defs = loaded.hosts;
     tracing::info!(
         hosts = host_defs.len(),
         candidates = host_defs.iter().map(|d| d.ips.len()).sum::<usize>(),
+        pinned = loaded.pinned,
         "loaded host definitions"
     );
+    if loaded.pinned {
+        for def in &host_defs {
+            tracing::info!(
+                endpoint = %def.name,
+                ips = ?def.ips,
+                "using pinned CDN IPs; speedtest disabled"
+            );
+        }
+    }
 
     // SQLite writer thread + handle
     let db_path = PathBuf::from("data/xboxproxy.db");
@@ -78,15 +89,20 @@ async fn main() -> anyhow::Result<()> {
             .build(connector);
 
     // Periodic upstream speed/latency measurement. The control handle is also
-    // used by the dashboard "Run now" button.
+    // used by the dashboard "Run now" button. Pinning IPs fully disables this:
+    // no loop, no warmup, no manual trigger.
     let speedtest_control = speedtest::SpeedTestControl::new();
-    tokio::spawn(speedtest::run_forever(
-        speedtest_cfg,
-        selector.clone(),
-        metrics.clone(),
-        client.clone(),
-        speedtest_control.clone(),
-    ));
+    if loaded.pinned {
+        tracing::info!("speedtest disabled because CDN IPs are pinned");
+    } else {
+        tokio::spawn(speedtest::run_forever(
+            speedtest_cfg,
+            selector.clone(),
+            metrics.clone(),
+            client.clone(),
+            speedtest_control.clone(),
+        ));
+    }
 
     let app_state = AppState {
         selector,
@@ -94,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
         client,
         db_path,
         speedtest: speedtest_control,
+        pinned: loaded.pinned,
     };
 
     let bind_addr: SocketAddr = "0.0.0.0:80".parse()?;

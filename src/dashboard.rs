@@ -67,6 +67,8 @@ async fn summary(State(state): State<AppState>) -> Response {
             "recent": recent,
             "recent_speedtests": recent_st,
             "speedtest_running": state.speedtest.is_running(),
+            "pinned": state.pinned,
+            "speedtest_disabled": state.pinned,
         }))
         .into_response(),
         _ => to_500(anyhow::anyhow!("query failed")),
@@ -74,6 +76,9 @@ async fn summary(State(state): State<AppState>) -> Response {
 }
 
 async fn run_speedtest(State(state): State<AppState>) -> Response {
+    if state.pinned {
+        return Json(json!({ "started": false, "reason": "pinned" })).into_response();
+    }
     if state.speedtest.is_running() {
         return Json(json!({ "started": false, "reason": "already_running" })).into_response();
     }

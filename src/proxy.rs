@@ -57,6 +57,8 @@ pub struct AppState {
     pub client: ProxyClient,
     pub db_path: PathBuf,
     pub speedtest: SpeedTestControl,
+    /// When true, candidate IPs were pinned via env and speedtest is off.
+    pub pinned: bool,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -612,6 +614,7 @@ mod tests {
             client,
             db_path: std::path::PathBuf::from("/tmp/xboxproxy-test.db"),
             speedtest: SpeedTestControl::new(),
+            pinned: false,
         };
         let req = axum::http::Request::builder()
             .uri("/")

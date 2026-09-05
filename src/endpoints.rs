@@ -1,7 +1,13 @@
 use std::collections::HashSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use crate::selector::HostDef;
+
+/// IPv4 for the xbox-assets (CN1) group. When either pin env is set, speedtest
+/// is disabled and the group uses this address only.
+pub const PIN_CN1_ENV: &str = "XBOXPROXY_PIN_CN1";
+/// IPv4 for the xbox-content (CN2) group.
+pub const PIN_CN2_ENV: &str = "XBOXPROXY_PIN_CN2";
 
 struct EndpointSpec {
     name: &'static str,
@@ -45,7 +51,52 @@ const ENDPOINTS: &[EndpointSpec] = &[
     },
 ];
 
-pub fn load() -> anyhow::Result<Vec<HostDef>> {
+pub struct LoadedEndpoints {
+    pub hosts: Vec<HostDef>,
+    /// True when a pin env var replaced speedtest-selected IPs.
+    pub pinned: bool,
+}
+
+pub fn load() -> anyhow::Result<LoadedEndpoints> {
+    let mut hosts = load_bundled()?;
+    let cn1 = ipv4_from_env(PIN_CN1_ENV)?;
+    let cn2 = ipv4_from_env(PIN_CN2_ENV)?;
+    if let Some(ip) = cn1 {
+        pin_group(&mut hosts, "xbox-assets", ip);
+    }
+    if let Some(ip) = cn2 {
+        pin_group(&mut hosts, "xbox-content", ip);
+    }
+    Ok(LoadedEndpoints {
+        hosts,
+        pinned: cn1.is_some() || cn2.is_some(),
+    })
+}
+
+fn ipv4_from_env(name: &str) -> anyhow::Result<Option<IpAddr>> {
+    match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => anyhow::bail!("cannot read {name}: {e}"),
+        Ok(raw) => {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return Ok(None);
+            }
+            let ip: Ipv4Addr = raw
+                .parse()
+                .map_err(|_| anyhow::anyhow!("{name} must be an IPv4 address, got {raw:?}"))?;
+            Ok(Some(IpAddr::V4(ip)))
+        }
+    }
+}
+
+fn pin_group(hosts: &mut [HostDef], name: &str, ip: IpAddr) {
+    if let Some(host) = hosts.iter_mut().find(|h| h.name == name) {
+        host.ips = vec![ip];
+    }
+}
+
+fn load_bundled() -> anyhow::Result<Vec<HostDef>> {
     ENDPOINTS
         .iter()
         .map(|spec| {
@@ -82,7 +133,7 @@ mod tests {
 
     #[test]
     fn loads_hardcoded_xbox_endpoint_groups() {
-        let endpoints = load().unwrap();
+        let endpoints = load_bundled().unwrap();
         assert_eq!(endpoints.len(), 2);
         assert_eq!(
             endpoints[0].test_url,
@@ -96,5 +147,16 @@ mod tests {
             .domain_map
             .iter()
             .any(|(c, u)| c == "assets1.xboxlive.com" && u == "assets1.xboxlive.cn"));
+    }
+
+    #[test]
+    fn pin_replaces_each_group_with_a_single_ipv4() {
+        let mut hosts = load_bundled().unwrap();
+        let cn1: IpAddr = "112.64.213.194".parse().unwrap();
+        let cn2: IpAddr = "218.98.44.41".parse().unwrap();
+        pin_group(&mut hosts, "xbox-assets", cn1);
+        pin_group(&mut hosts, "xbox-content", cn2);
+        assert_eq!(hosts[0].ips, vec![cn1]);
+        assert_eq!(hosts[1].ips, vec![cn2]);
     }
 }

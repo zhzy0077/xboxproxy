@@ -22,6 +22,20 @@ files in the reference XboxDownload project.
 Only these six hosts are accepted. Other hosts receive `404`; the service does
 not perform passthrough DNS resolution.
 
+## Pinning CDN IPs
+
+To skip speed testing and always use a known-good address, set one IPv4 per
+group:
+
+```sh
+XBOXPROXY_PIN_CN1=112.64.213.194 XBOXPROXY_PIN_CN2=218.98.44.41 ./target/release/xboxproxy
+```
+
+`XBOXPROXY_PIN_CN1` pins `xbox-assets` (assets/d1/d2). `XBOXPROXY_PIN_CN2` pins
+`xbox-content` (dlassets). When either is set, speed testing is fully disabled:
+no startup warmup, no hourly pass, and the dashboard "Run now" button is
+rejected.
+
 ## Build and Run
 
 ```sh
@@ -111,7 +125,8 @@ Xbox/console  →  AdGuard Home (DNS rewrite → proxy host)  →  Caddy :80  �
 ## Speed Testing Policy
 
 Speed tests can saturate the uplink (64 concurrent 10 MiB downloads), so they
-are deliberately conservative:
+are deliberately conservative. They do not run at all when `XBOXPROXY_PIN_CN1`
+or `XBOXPROXY_PIN_CN2` is set.
 
 - A pass runs at most once per hour (plus one warm-up pass at startup).
 - While the proxy is serving client traffic (or served a request within the
