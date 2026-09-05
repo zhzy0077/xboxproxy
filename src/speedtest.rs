@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -50,6 +50,24 @@ impl Default for SpeedTestConfig {
 /// measurements are not skewed by concurrent transfers.
 pub const ACTIVITY_GRACE: Duration = Duration::from_secs(60);
 
+pub const AUTO_SPEEDTEST_ENV: &str = "XBOXPROXY_AUTO_SPEEDTEST";
+
+/// Automatic hourly/warmup passes. Unset or empty defaults to on; `0` / `false`
+/// / `no` / `off` disables them. Manual dashboard runs still work.
+pub fn auto_from_env() -> bool {
+    parse_auto_speedtest(std::env::var(AUTO_SPEEDTEST_ENV).ok().as_deref())
+}
+
+pub fn parse_auto_speedtest(raw: Option<&str>) -> bool {
+    match raw {
+        None => true,
+        Some(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            v.is_empty() || !matches!(v.as_str(), "0" | "false" | "no" | "off")
+        }
+    }
+}
+
 /// Shared handle for triggering speedtest passes on demand (dashboard button)
 /// and for reporting whether a pass is currently running.
 #[derive(Clone, Default)]
@@ -61,6 +79,9 @@ pub struct SpeedTestControl {
 struct SpeedTestControlInner {
     notify: Notify,
     running: AtomicBool,
+    /// When `Some`, the next manual pass uses this URL and updates only the
+    /// matching endpoint group. `None` tests every group with its bundled URL.
+    pending_url: Mutex<Option<String>>,
 }
 
 impl SpeedTestControl {
@@ -68,9 +89,15 @@ impl SpeedTestControl {
         Self::default()
     }
 
-    /// Wake the speedtest loop so it runs a pass as soon as the proxy is idle.
-    pub fn trigger(&self) {
+    /// Wake the speedtest loop. `url` restricts the pass to the group that
+    /// owns that host; `None` tests every group.
+    pub fn trigger(&self, url: Option<String>) {
+        *self.inner.pending_url.lock().unwrap() = url;
         self.inner.notify.notify_one();
+    }
+
+    fn take_url(&self) -> Option<String> {
+        self.inner.pending_url.lock().unwrap().take()
     }
 
     pub fn is_running(&self) -> bool {
@@ -84,34 +111,64 @@ pub async fn run_forever(
     metrics: MetricsStore,
     client: ProxyClient,
     control: SpeedTestControl,
+    auto: bool,
 ) {
-    tracing::info!(interval_sec = cfg.interval_sec, "speedtest loop started");
-    let warmup = cfg.warmup_passes.max(1);
-    for i in 0..warmup {
-        wait_until_idle(&cfg, &metrics).await;
-        run_controlled_pass(&cfg, &selector, &metrics, &client, &control, false).await;
-        if i + 1 < warmup {
-            tokio::time::sleep(Duration::from_secs(2)).await;
+    if auto {
+        tracing::info!(interval_sec = cfg.interval_sec, "speedtest loop started");
+        let warmup = cfg.warmup_passes.max(1);
+        for i in 0..warmup {
+            wait_until_idle(&cfg, &metrics).await;
+            run_controlled_pass(&cfg, &selector, &metrics, &client, &control, false, None).await;
+            if i + 1 < warmup {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
         }
+    } else {
+        tracing::info!("automatic speedtest disabled; waiting for dashboard trigger");
     }
     loop {
-        let forced = tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(cfg.interval_sec)) => {
-                tracing::info!("scheduled speedtest pass due");
-                false
+        let forced = if auto {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(cfg.interval_sec)) => {
+                    tracing::info!("scheduled speedtest pass due");
+                    false
+                }
+                _ = control.inner.notify.notified() => {
+                    tracing::info!("manual speedtest requested (forced)");
+                    true
+                }
             }
-            _ = control.inner.notify.notified() => {
-                tracing::info!("manual speedtest requested (forced)");
-                true
-            }
+        } else {
+            control.inner.notify.notified().await;
+            tracing::info!("manual speedtest requested (forced)");
+            true
         };
+        let url = if forced { control.take_url() } else { None };
         if forced {
             // Manual trigger: run immediately, even if the proxy is serving
             // downloads, and do not abort mid-pass because of traffic.
-            run_controlled_pass(&cfg, &selector, &metrics, &client, &control, true).await;
+            run_controlled_pass(
+                &cfg,
+                &selector,
+                &metrics,
+                &client,
+                &control,
+                true,
+                url.as_deref(),
+            )
+            .await;
         } else {
             wait_until_idle(&cfg, &metrics).await;
-            run_controlled_pass(&cfg, &selector, &metrics, &client, &control, false).await;
+            run_controlled_pass(
+                &cfg,
+                &selector,
+                &metrics,
+                &client,
+                &control,
+                false,
+                url.as_deref(),
+            )
+            .await;
         }
     }
 }
@@ -135,10 +192,34 @@ async fn run_controlled_pass(
     client: &ProxyClient,
     control: &SpeedTestControl,
     forced: bool,
+    url_override: Option<&str>,
 ) {
     control.inner.running.store(true, Ordering::SeqCst);
-    run_pass(cfg, selector, metrics, client, forced).await;
+    run_pass(cfg, selector, metrics, client, forced, url_override).await;
     control.inner.running.store(false, Ordering::SeqCst);
+}
+
+/// Endpoint groups to test. A URL override selects the single group that
+/// owns that host (e.g. `http://assets1.xboxlive.cn/Z/XXXX` → xbox-assets).
+fn target_defs(
+    selector: &Selector,
+    url_override: Option<&str>,
+) -> anyhow::Result<(Vec<HostDef>, Option<Uri>)> {
+    match url_override {
+        None => Ok((selector.defs(), None)),
+        Some(raw) => {
+            let uri: Uri = raw
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid test URL: {e}"))?;
+            let host = uri
+                .host()
+                .ok_or_else(|| anyhow::anyhow!("test URL has no host"))?;
+            let def = selector.host_for(host).cloned().ok_or_else(|| {
+                anyhow::anyhow!("test URL host {host:?} is not a managed Xbox CDN domain")
+            })?;
+            Ok((vec![def], Some(uri)))
+        }
+    }
 }
 
 pub async fn run_pass(
@@ -147,22 +228,34 @@ pub async fn run_pass(
     metrics: &MetricsStore,
     client: &ProxyClient,
     forced: bool,
+    url_override: Option<&str>,
 ) {
-    let defs = selector.defs();
+    let (defs, override_uri) = match target_defs(selector, url_override) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "speedtest pass skipped");
+            return;
+        }
+    };
     let total: usize = defs.iter().map(|d| d.ips.len()).sum();
     tracing::info!(
         hosts = defs.len(),
         candidates = total,
+        url = url_override.unwrap_or("bundled"),
         "running speedtest pass"
     );
 
     let mut tasks = Vec::new();
     for def in &defs {
-        let test_url: Uri = match def.test_url.parse() {
-            Ok(u) => u,
-            Err(e) => {
-                tracing::error!(host = %def.name, error = %e, "invalid endpoint test_url");
-                continue;
+        let test_url: Uri = if let Some(u) = &override_uri {
+            u.clone()
+        } else {
+            match def.test_url.parse() {
+                Ok(u) => u,
+                Err(e) => {
+                    tracing::error!(host = %def.name, error = %e, "invalid endpoint test_url");
+                    continue;
+                }
             }
         };
         for ip in &def.ips {
@@ -453,5 +546,68 @@ mod tests {
         assert!(result.latency_ms.is_none());
         assert!(result.speed_kbps.is_none());
         server.abort();
+    }
+
+    #[test]
+    fn parse_auto_speedtest_defaults_on() {
+        assert!(parse_auto_speedtest(None));
+        assert!(parse_auto_speedtest(Some("")));
+        assert!(parse_auto_speedtest(Some("true")));
+        assert!(!parse_auto_speedtest(Some("0")));
+        assert!(!parse_auto_speedtest(Some("false")));
+        assert!(!parse_auto_speedtest(Some("OFF")));
+    }
+
+    fn two_groups() -> Selector {
+        Selector::new(
+            vec![
+                HostDef {
+                    name: "xbox-assets".into(),
+                    domain_map: vec![
+                        ("assets1.xboxlive.cn".into(), "assets1.xboxlive.cn".into()),
+                        ("assets2.xboxlive.cn".into(), "assets2.xboxlive.cn".into()),
+                        ("d1.xboxlive.cn".into(), "assets1.xboxlive.cn".into()),
+                        ("d2.xboxlive.cn".into(), "assets2.xboxlive.cn".into()),
+                    ],
+                    ips: vec!["1.1.1.1".parse().unwrap()],
+                    upstream_port: 80,
+                    test_url: "http://assets1.xboxlive.cn/default".into(),
+                },
+                HostDef {
+                    name: "xbox-content".into(),
+                    domain_map: vec![
+                        ("dlassets.xboxlive.cn".into(), "dlassets.xboxlive.cn".into()),
+                        (
+                            "dlassets2.xboxlive.cn".into(),
+                            "dlassets2.xboxlive.cn".into(),
+                        ),
+                    ],
+                    ips: vec!["2.2.2.2".parse().unwrap()],
+                    upstream_port: 80,
+                    test_url: "http://dlassets.xboxlive.cn/default".into(),
+                },
+            ],
+            Duration::from_secs(60),
+        )
+    }
+
+    #[test]
+    fn test_url_selects_only_the_matching_group() {
+        let s = two_groups();
+        let (defs, uri) = target_defs(&s, Some("http://assets1.xboxlive.cn/Z/XXXX")).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "xbox-assets");
+        assert_eq!(uri.unwrap().path(), "/Z/XXXX");
+
+        let (defs, _) = target_defs(&s, Some("http://dlassets2.xboxlive.cn/public/foo")).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "xbox-content");
+
+        let (defs, uri) = target_defs(&s, None).unwrap();
+        assert_eq!(defs.len(), 2);
+        assert!(uri.is_none());
+
+        assert!(target_defs(&s, Some("http://example.com/x")).is_err());
+        assert!(target_defs(&s, Some("not a url")).is_err());
     }
 }

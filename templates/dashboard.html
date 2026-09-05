@@ -46,6 +46,11 @@
   .btn { background: var(--accent); color: #0f172a; border: 0; border-radius: 6px;
          padding: 4px 12px; font-size: 12px; font-weight: 600; cursor: pointer; }
   .btn:disabled { opacity: .5; cursor: default; }
+  .text { background: var(--bg); color: var(--text); border: 1px solid var(--border);
+          border-radius: 6px; padding: 4px 8px; font-size: 12px; min-width: 280px;
+          font-family: inherit; }
+  #tb-requests tr { cursor: pointer; }
+  #tb-requests tr:hover { background: #33415566; }
 </style>
 </head>
 <body>
@@ -104,6 +109,7 @@
     <div class="row" style="justify-content: space-between;">
       <h2>Recent speed tests</h2>
       <span class="row">
+        <input id="st-url" class="text" type="url" placeholder="http://assets1.xboxlive.cn/Z/..." />
         <span id="st-msg" class="muted"></span>
         <button id="btn-speedtest" class="btn" type="button">Run now</button>
       </span>
@@ -116,6 +122,7 @@
 
   <div class="card grid">
     <h2>Recent requests</h2>
+    <div class="sub">click a row to copy its URL into the speedtest box</div>
     <table>
       <thead><tr><th>Time</th><th>Client</th><th>Host</th><th>Path</th><th>Status</th><th>Bytes</th><th>Speed (kbps)</th><th>TTFB (ms)</th><th>Upstream</th><th>Error</th></tr></thead>
       <tbody id="tb-requests"></tbody>
@@ -134,6 +141,41 @@ const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
 }[c]));
 const statusClass = (s) => s >= 500 ? "err" : (s >= 400 ? "warn" : "ok");
+const speedtestUrlFromRequest = (r) => {
+  const host = String(r.host || "").replace(/\.xboxlive\.com$/i, ".xboxlive.cn");
+  let path = r.path || "/";
+  if (!path.startsWith("/")) path = "/" + path;
+  return `http://${host}${path}`;
+};
+
+const copyText = async (text) => {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall through */ }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.left = "-9999px";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  return ok;
+};
+
+document.getElementById("tb-requests").addEventListener("click", async (e) => {
+  const tr = e.target.closest("tr");
+  if (!tr || !tr.dataset.url) return;
+  const url = tr.dataset.url;
+  document.getElementById("st-url").value = url;
+  const copied = await copyText(url);
+  setStMsg(copied ? "copied URL" : "filled URL");
+});
 
 let chSpeed, chLatency, chStatus;
 const btnSt = document.getElementById("btn-speedtest");
@@ -144,12 +186,19 @@ const setStMsg = (t) => { stMsg.textContent = t; stMsgSetAt = Date.now(); };
 btnSt.addEventListener("click", async () => {
   btnSt.disabled = true;
   setStMsg("starting…");
+  const url = document.getElementById("st-url").value.trim();
   try {
-    const r = await fetch("/manage/api/speedtests/run", { method: "POST" });
+    const r = await fetch("/manage/api/speedtests/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: url || null }),
+    });
     const d = await r.json();
     if (d.started) setStMsg("started — results in ~1-2 min");
     else if (d.reason === "already_running") setStMsg("already running");
     else if (d.reason === "pinned") setStMsg("disabled — IPs pinned");
+    else if (d.reason === "invalid_url") setStMsg("invalid URL");
+    else if (d.reason === "unknown_host") setStMsg("URL host is not a managed Xbox CDN");
     else setStMsg("request failed");
   } catch {
     setStMsg("request failed");
@@ -163,15 +212,20 @@ async function load() {
     document.getElementById("status").textContent = "online";
     document.getElementById("now").textContent = fmtTime(d.now);
 
+    const stUrl = document.getElementById("st-url");
     if (d.pinned || d.speedtest_disabled) {
       btnSt.disabled = true;
+      stUrl.disabled = true;
       stMsg.textContent = "disabled — IPs pinned";
     } else if (d.speedtest_running) {
       btnSt.disabled = true;
       setStMsg("running…");
     } else {
       btnSt.disabled = false;
-      if (Date.now() - stMsgSetAt > 10000) stMsg.textContent = "";
+      stUrl.disabled = false;
+      if (Date.now() - stMsgSetAt > 10000) {
+        stMsg.textContent = d.auto_speedtest ? "" : "auto speedtest off";
+      }
     }
 
     const h24 = d.last_24h, h1 = d.last_hour;
@@ -264,6 +318,9 @@ async function load() {
     tbR.innerHTML = "";
     for (const r of d.recent) {
       const tr = document.createElement("tr");
+      const testUrl = speedtestUrlFromRequest(r);
+      tr.dataset.url = testUrl;
+      tr.title = "Copy " + testUrl;
       tr.innerHTML = `<td>${fmtTime(r.ts)}</td><td>${esc(r.client_ip)}</td><td>${esc(r.host)}</td>
         <td class="path" title="${esc(r.path)}">${esc(r.method)} ${esc(r.path)}</td>
         <td class="${statusClass(r.status)}">${r.status}</td>

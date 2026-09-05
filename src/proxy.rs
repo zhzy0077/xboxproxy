@@ -59,6 +59,8 @@ pub struct AppState {
     pub speedtest: SpeedTestControl,
     /// When true, candidate IPs were pinned via env and speedtest is off.
     pub pinned: bool,
+    /// When false, the hourly/warmup loop is off; dashboard URL runs still work.
+    pub auto_speedtest: bool,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -615,6 +617,7 @@ mod tests {
             db_path: std::path::PathBuf::from("/tmp/xboxproxy-test.db"),
             speedtest: SpeedTestControl::new(),
             pinned: false,
+            auto_speedtest: true,
         };
         let req = axum::http::Request::builder()
             .uri("/")

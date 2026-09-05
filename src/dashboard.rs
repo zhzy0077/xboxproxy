@@ -69,21 +69,49 @@ async fn summary(State(state): State<AppState>) -> Response {
             "speedtest_running": state.speedtest.is_running(),
             "pinned": state.pinned,
             "speedtest_disabled": state.pinned,
+            "auto_speedtest": state.auto_speedtest,
         }))
         .into_response(),
         _ => to_500(anyhow::anyhow!("query failed")),
     }
 }
 
-async fn run_speedtest(State(state): State<AppState>) -> Response {
+#[derive(Deserialize, Default)]
+struct RunSpeedtestBody {
+    #[serde(default)]
+    url: Option<String>,
+}
+
+async fn run_speedtest(
+    State(state): State<AppState>,
+    Json(body): Json<RunSpeedtestBody>,
+) -> Response {
     if state.pinned {
         return Json(json!({ "started": false, "reason": "pinned" })).into_response();
     }
     if state.speedtest.is_running() {
         return Json(json!({ "started": false, "reason": "already_running" })).into_response();
     }
-    state.speedtest.trigger();
-    tracing::info!("manual speedtest requested via dashboard (forced)");
+    let url = body
+        .url
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(raw) = url.as_deref() {
+        let uri: axum::http::Uri = match raw.parse() {
+            Ok(u) => u,
+            Err(_) => {
+                return Json(json!({ "started": false, "reason": "invalid_url" })).into_response();
+            }
+        };
+        let host = uri.host().unwrap_or("");
+        let Some(def) = state.selector.host_for(host) else {
+            return Json(json!({ "started": false, "reason": "unknown_host" })).into_response();
+        };
+        tracing::info!(url = raw, group = %def.name, "manual speedtest requested via dashboard");
+    } else {
+        tracing::info!("manual speedtest requested via dashboard (all groups)");
+    }
+    state.speedtest.trigger(url);
     Json(json!({ "started": true, "reason": null })).into_response()
 }
 

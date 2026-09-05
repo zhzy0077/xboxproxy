@@ -15,3 +15,5 @@ services:
       # Optional: pin one IPv4 per group and disable speed tests.
       # XBOXPROXY_PIN_CN1: "112.64.213.194"
       # XBOXPROXY_PIN_CN2: "218.98.44.41"
+      # Optional: skip warmup/hourly speed tests (dashboard URL still works).
+      # XBOXPROXY_AUTO_SPEEDTEST: "false"

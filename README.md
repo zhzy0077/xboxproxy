@@ -36,6 +36,9 @@ XBOXPROXY_PIN_CN1=112.64.213.194 XBOXPROXY_PIN_CN2=218.98.44.41 ./target/release
 no startup warmup, no hourly pass, and the dashboard "Run now" button is
 rejected.
 
+To keep pinning off but skip the hourly/warmup loop, set
+`XBOXPROXY_AUTO_SPEEDTEST=false`. Manual tests from `/manage` still run.
+
 ## Build and Run
 
 ```sh
@@ -126,7 +129,12 @@ Xbox/console  →  AdGuard Home (DNS rewrite → proxy host)  →  Caddy :80  �
 
 Speed tests can saturate the uplink (64 concurrent 10 MiB downloads), so they
 are deliberately conservative. They do not run at all when `XBOXPROXY_PIN_CN1`
-or `XBOXPROXY_PIN_CN2` is set.
+or `XBOXPROXY_PIN_CN2` is set. Set `XBOXPROXY_AUTO_SPEEDTEST=false` to disable
+only the scheduled warmup/hourly passes.
+
+The dashboard URL field runs a pass against that file and updates **only** the
+matching group: an `assets1` / `assets2` / `d1` / `d2` URL updates xbox-assets;
+a `dlassets` / `dlassets2` URL updates xbox-content.
 
 - A pass runs at most once per hour (plus one warm-up pass at startup).
 - While the proxy is serving client traffic (or served a request within the
@@ -145,7 +153,7 @@ or `XBOXPROXY_PIN_CN2` is set.
 | `/manage/api/summary` | Recent summary, charts, hosts, and records |
 | `/manage/api/requests?limit=100&since=<unix>` | Recent request metrics |
 | `/manage/api/speedtests?limit=100` | Recent speed-test results |
-| `/manage/api/speedtests/run` (POST) | Trigger a speed-test pass manually |
+| `/manage/api/speedtests/run` (POST `{ "url": "..." }`) | Trigger a speed-test pass; `url` limits it to one group |
 | `/manage/api/hosts` | Current candidate ranking |
 
 ## Tests

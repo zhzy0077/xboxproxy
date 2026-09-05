@@ -89,9 +89,11 @@ async fn main() -> anyhow::Result<()> {
             .build(connector);
 
     // Periodic upstream speed/latency measurement. The control handle is also
-    // used by the dashboard "Run now" button. Pinning IPs fully disables this:
-    // no loop, no warmup, no manual trigger.
+    // used by the dashboard "Run now" button. Pinning IPs fully disables this.
+    // XBOXPROXY_AUTO_SPEEDTEST=false skips warmup/hourly passes but still
+    // accepts a dashboard URL trigger for a single group.
     let speedtest_control = speedtest::SpeedTestControl::new();
+    let auto_speedtest = speedtest::auto_from_env();
     if loaded.pinned {
         tracing::info!("speedtest disabled because CDN IPs are pinned");
     } else {
@@ -101,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
             metrics.clone(),
             client.clone(),
             speedtest_control.clone(),
+            auto_speedtest,
         ));
     }
 
@@ -111,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
         db_path,
         speedtest: speedtest_control,
         pinned: loaded.pinned,
+        auto_speedtest: auto_speedtest && !loaded.pinned,
     };
 
     let bind_addr: SocketAddr = "0.0.0.0:80".parse()?;
