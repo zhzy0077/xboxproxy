@@ -48,6 +48,8 @@ pub struct HostState {
     pub domains: Vec<String>,
     pub upstream_port: u16,
     pub candidates: Vec<CandidateState>,
+    /// Dashboard/runtime pin; `None` means the bundled candidate list is used.
+    pub pinned_ip: Option<IpAddr>,
 }
 
 #[derive(Clone)]
@@ -62,6 +64,8 @@ struct SelectorInner {
 
 struct HostStateInner {
     def: HostDef,
+    bundled_ips: Vec<IpAddr>,
+    pinned_ip: RwLock<Option<IpAddr>>,
     candidates: RwLock<Vec<CandidateState>>,
 }
 
@@ -69,24 +73,11 @@ impl Selector {
     pub fn new(defs: Vec<HostDef>, failure_penalty: Duration) -> Self {
         let hosts: Vec<HostStateInner> = defs
             .into_iter()
-            .map(|def| {
-                let candidates = def
-                    .ips
-                    .iter()
-                    .map(|ip| CandidateState {
-                        ip: *ip,
-                        latency_ms: None,
-                        speed_kbps: None,
-                        last_ok_ts: 0,
-                        last_fail_ts: 0,
-                        fails: 0,
-                        down: false,
-                    })
-                    .collect();
-                HostStateInner {
-                    def,
-                    candidates: RwLock::new(candidates),
-                }
+            .map(|def| HostStateInner {
+                bundled_ips: def.ips.clone(),
+                candidates: RwLock::new(Self::fresh_candidates(&def.ips)),
+                def,
+                pinned_ip: RwLock::new(None),
             })
             .collect();
         Selector {
@@ -209,6 +200,47 @@ impl Selector {
         self.update_result(host, ip, None, None, false).await;
     }
 
+    fn fresh_candidates(ips: &[IpAddr]) -> Vec<CandidateState> {
+        ips.iter()
+            .map(|ip| CandidateState {
+                ip: *ip,
+                latency_ms: None,
+                speed_kbps: None,
+                last_ok_ts: 0,
+                last_fail_ts: 0,
+                fails: 0,
+                down: false,
+            })
+            .collect()
+    }
+
+    /// Pin a group to one IPv4, or `None` to restore the bundled candidate list.
+    pub async fn set_pinned_ip(&self, name: &str, ip: Option<IpAddr>) -> anyhow::Result<()> {
+        let i = self
+            .index_of(name)
+            .ok_or_else(|| anyhow::anyhow!("unknown group {name:?}"))?;
+        let inner = &self.inner.hosts[i];
+        let ips = match ip {
+            Some(ip) => vec![ip],
+            None => inner.bundled_ips.clone(),
+        };
+        if ips.is_empty() {
+            anyhow::bail!("no IPs to restore for {name}");
+        }
+        *inner.pinned_ip.write().await = ip;
+        *inner.candidates.write().await = Self::fresh_candidates(&ips);
+        Ok(())
+    }
+
+    /// Host definition with the live candidate IP list (after dashboard pins).
+    pub async fn def_for_host(&self, host: &str) -> Option<HostDef> {
+        let i = self.index_of(host)?;
+        let h = &self.inner.hosts[i];
+        let mut def = h.def.clone();
+        def.ips = h.candidates.read().await.iter().map(|c| c.ip).collect();
+        Some(def)
+    }
+
     pub async fn resolve(&self, host: &str, port: u16) -> io::Result<SocketAddr> {
         if let Some(ip) = CURRENT_IP.try_with(|c| c.get()).unwrap_or(None) {
             return Ok(SocketAddr::new(ip, port));
@@ -256,13 +288,20 @@ impl Selector {
                     .collect(),
                 upstream_port: h.def.upstream_port,
                 candidates: sorted,
+                pinned_ip: *h.pinned_ip.read().await,
             });
         }
         out
     }
 
-    pub fn defs(&self) -> Vec<HostDef> {
-        self.inner.hosts.iter().map(|h| h.def.clone()).collect()
+    pub async fn defs(&self) -> Vec<HostDef> {
+        let mut out = Vec::new();
+        for h in &self.inner.hosts {
+            let mut def = h.def.clone();
+            def.ips = h.candidates.read().await.iter().map(|c| c.ip).collect();
+            out.push(def);
+        }
+        out
     }
 }
 
@@ -379,5 +418,26 @@ mod tests {
             s.best_ip("CDN.EXAMPLE.COM.").await,
             Some("1.1.1.1".parse().unwrap())
         );
+    }
+
+    #[tokio::test]
+    async fn dashboard_pin_replaces_candidates_and_can_restore() {
+        let s = Selector::new(
+            vec![def(vec![
+                "1.1.1.1".parse().unwrap(),
+                "2.2.2.2".parse().unwrap(),
+            ])],
+            Duration::from_secs(60),
+        );
+        let pin: IpAddr = "9.9.9.9".parse().unwrap();
+        s.set_pinned_ip("t", Some(pin)).await.unwrap();
+        assert_eq!(s.best_ip("cdn.example.com").await, Some(pin));
+        assert_eq!(s.defs().await[0].ips, vec![pin]);
+        assert_eq!(s.snapshot().await[0].pinned_ip, Some(pin));
+
+        s.set_pinned_ip("t", None).await.unwrap();
+        let restored = s.defs().await;
+        assert_eq!(restored[0].ips.len(), 2);
+        assert!(s.snapshot().await[0].pinned_ip.is_none());
     }
 }

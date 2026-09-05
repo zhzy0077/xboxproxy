@@ -21,6 +21,7 @@ pub fn router(state: AppState) -> Router {
         .route("/manage/api/speedtests", get(speedtests))
         .route("/manage/api/speedtests/run", post(run_speedtest))
         .route("/manage/api/hosts", get(hosts))
+        .route("/manage/api/groups/pin", post(pin_group))
         .with_state(state)
 }
 
@@ -142,4 +143,31 @@ async fn speedtests(State(state): State<AppState>, Query(q): Query<LimitQuery>) 
 async fn hosts(State(state): State<AppState>) -> Response {
     let snapshot = state.selector.snapshot().await;
     Json(snapshot).into_response()
+}
+
+#[derive(Deserialize)]
+struct PinGroupBody {
+    name: String,
+    #[serde(default)]
+    ip: Option<String>,
+}
+
+async fn pin_group(State(state): State<AppState>, Json(body): Json<PinGroupBody>) -> Response {
+    let ip = match body.ip.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => None,
+        Some(raw) => match raw.parse::<std::net::Ipv4Addr>() {
+            Ok(ip) => Some(std::net::IpAddr::V4(ip)),
+            Err(_) => {
+                return Json(json!({ "ok": false, "reason": "invalid_ip" })).into_response();
+            }
+        },
+    };
+    match state.selector.set_pinned_ip(&body.name, ip).await {
+        Ok(()) => {
+            tracing::info!(group = %body.name, ?ip, "dashboard pinned group IP");
+            Json(json!({ "ok": true, "reason": null, "ip": ip.map(|i| i.to_string()) }))
+                .into_response()
+        }
+        Err(e) => Json(json!({ "ok": false, "reason": e.to_string() })).into_response(),
+    }
 }

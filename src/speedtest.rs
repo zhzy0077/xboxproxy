@@ -201,12 +201,12 @@ async fn run_controlled_pass(
 
 /// Endpoint groups to test. A URL override selects the single group that
 /// owns that host (e.g. `http://assets1.xboxlive.cn/Z/XXXX` → xbox-assets).
-fn target_defs(
+async fn target_defs(
     selector: &Selector,
     url_override: Option<&str>,
 ) -> anyhow::Result<(Vec<HostDef>, Option<Uri>)> {
     match url_override {
-        None => Ok((selector.defs(), None)),
+        None => Ok((selector.defs().await, None)),
         Some(raw) => {
             let uri: Uri = raw
                 .parse()
@@ -214,7 +214,7 @@ fn target_defs(
             let host = uri
                 .host()
                 .ok_or_else(|| anyhow::anyhow!("test URL has no host"))?;
-            let def = selector.host_for(host).cloned().ok_or_else(|| {
+            let def = selector.def_for_host(host).await.ok_or_else(|| {
                 anyhow::anyhow!("test URL host {host:?} is not a managed Xbox CDN domain")
             })?;
             Ok((vec![def], Some(uri)))
@@ -230,7 +230,7 @@ pub async fn run_pass(
     forced: bool,
     url_override: Option<&str>,
 ) {
-    let (defs, override_uri) = match target_defs(selector, url_override) {
+    let (defs, override_uri) = match target_defs(selector, url_override).await {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = %e, "speedtest pass skipped");
@@ -591,23 +591,27 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_url_selects_only_the_matching_group() {
+    #[tokio::test]
+    async fn test_url_selects_only_the_matching_group() {
         let s = two_groups();
-        let (defs, uri) = target_defs(&s, Some("http://assets1.xboxlive.cn/Z/XXXX")).unwrap();
+        let (defs, uri) = target_defs(&s, Some("http://assets1.xboxlive.cn/Z/XXXX"))
+            .await
+            .unwrap();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "xbox-assets");
         assert_eq!(uri.unwrap().path(), "/Z/XXXX");
 
-        let (defs, _) = target_defs(&s, Some("http://dlassets2.xboxlive.cn/public/foo")).unwrap();
+        let (defs, _) = target_defs(&s, Some("http://dlassets2.xboxlive.cn/public/foo"))
+            .await
+            .unwrap();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "xbox-content");
 
-        let (defs, uri) = target_defs(&s, None).unwrap();
+        let (defs, uri) = target_defs(&s, None).await.unwrap();
         assert_eq!(defs.len(), 2);
         assert!(uri.is_none());
 
-        assert!(target_defs(&s, Some("http://example.com/x")).is_err());
-        assert!(target_defs(&s, Some("not a url")).is_err());
+        assert!(target_defs(&s, Some("http://example.com/x")).await.is_err());
+        assert!(target_defs(&s, Some("not a url")).await.is_err());
     }
 }

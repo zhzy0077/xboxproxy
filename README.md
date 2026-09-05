@@ -39,6 +39,9 @@ rejected.
 To keep pinning off but skip the hourly/warmup loop, set
 `XBOXPROXY_AUTO_SPEEDTEST=false`. Manual tests from `/manage` still run.
 
+The dashboard can also pin one IPv4 per group without restarting. Empty + Set
+restores the bundled candidate list.
+
 ## Build and Run
 
 ```sh
@@ -155,6 +158,7 @@ a `dlassets` / `dlassets2` URL updates xbox-content.
 | `/manage/api/speedtests?limit=100` | Recent speed-test results |
 | `/manage/api/speedtests/run` (POST `{ "url": "..." }`) | Trigger a speed-test pass; `url` limits it to one group |
 | `/manage/api/hosts` | Current candidate ranking |
+| `/manage/api/groups/pin` (POST `{ "name", "ip" }`) | Pin a group to one IPv4; omit `ip` to restore bundled candidates |
 
 ## Tests
 

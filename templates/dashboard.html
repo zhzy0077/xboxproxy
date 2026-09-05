@@ -99,6 +99,15 @@
 
   <div class="card grid">
     <h2>CDN candidates</h2>
+    <div class="row" style="margin-bottom:8px;">
+      <span class="muted">xbox-assets</span>
+      <input id="pin-xbox-assets" class="text" placeholder="IPv4" style="min-width:140px" />
+      <button id="btn-pin-xbox-assets" class="btn" type="button">Set</button>
+      <span class="muted">xbox-content</span>
+      <input id="pin-xbox-content" class="text" placeholder="IPv4" style="min-width:140px" />
+      <button id="btn-pin-xbox-content" class="btn" type="button">Set</button>
+      <span id="pin-msg" class="muted"></span>
+    </div>
     <table>
       <thead><tr><th>Host</th><th>Domains</th><th>IP</th><th>Speed (kbps)</th><th>Latency (ms)</th><th>Status</th></tr></thead>
       <tbody id="tb-hosts"></tbody>
@@ -167,6 +176,37 @@ const copyText = async (text) => {
   ta.remove();
   return ok;
 };
+
+const pinMsg = document.getElementById("pin-msg");
+const pinGroup = async (name, inputId) => {
+  const ip = document.getElementById(inputId).value.trim();
+  pinMsg.textContent = "saving…";
+  try {
+    const r = await fetch("/manage/api/groups/pin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, ip: ip || null }),
+    });
+    const d = await r.json();
+    if (d.ok) pinMsg.textContent = ip ? "pinned " + ip : "cleared — using bundled IPs";
+    else if (d.reason === "invalid_ip") pinMsg.textContent = "invalid IPv4";
+    else pinMsg.textContent = d.reason || "pin failed";
+  } catch {
+    pinMsg.textContent = "pin failed";
+  }
+};
+document.getElementById("btn-pin-xbox-assets").addEventListener("click", () => {
+  pinGroup("xbox-assets", "pin-xbox-assets");
+});
+document.getElementById("btn-pin-xbox-content").addEventListener("click", () => {
+  pinGroup("xbox-content", "pin-xbox-content");
+});
+document.getElementById("pin-xbox-assets").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") pinGroup("xbox-assets", "pin-xbox-assets");
+});
+document.getElementById("pin-xbox-content").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") pinGroup("xbox-content", "pin-xbox-content");
+});
 
 document.getElementById("tb-requests").addEventListener("click", async (e) => {
   const tr = e.target.closest("tr");
@@ -282,6 +322,14 @@ async function load() {
       chStatus.data.labels = d.status_counts.map(s => s.status);
       chStatus.data.datasets[0].data = d.status_counts.map(s => s.count);
       chStatus.update();
+    }
+
+    for (const name of ["xbox-assets", "xbox-content"]) {
+      const input = document.getElementById("pin-" + name);
+      const h = d.hosts.find((x) => x.name === name);
+      if (!input || !h || document.activeElement === input) continue;
+      input.value = h.pinned_ip || "";
+      input.placeholder = (h.candidates[0] && h.candidates[0].ip) || "IPv4";
     }
 
     const tbH = document.getElementById("tb-hosts");
